@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Messi vs Spain</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #060a12;
+    color: #dbe7f5;
+    font-family: "Courier New", monospace;
+    overflow: hidden;
+    overscroll-behavior: none;
+    -webkit-text-size-adjust: 100%;
+  }
+  body.touch { touch-action: none; }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 10px;
+    padding-bottom: 132px;          /* keeps the pitch clear of the controls */
+    box-sizing: border-box;
+  }
+  canvas {
+    display: block;
+    background: #060a12;
+    border: 2px solid #26405e;
+    box-shadow: 0 0 30px rgba(60,130,200,0.22);
+  }
+  #help {
+    font-size: 13px;
+    color: #7b97b5;
+    text-align: center;
+    letter-spacing: 1px;
+  }
+  b { color: #8fd2ff; }
+
+  /* on-screen controls — shown everywhere, clickable with a mouse too */
+  #touch {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    padding: 14px 18px calc(14px + env(safe-area-inset-bottom));
+    box-sizing: border-box;
+    pointer-events: none;
+    z-index: 10;
+  }
+  body.touch #help { display: none; }
+  #steer { display: flex; gap: 10px; pointer-events: auto; }
+  .pad {
+    -webkit-user-select: none; user-select: none;
+    touch-action: none;
+    width: 62px; height: 62px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 24px; color: #dbe7f5;
+    background: rgba(30,70,110,0.35);
+    border: 2px solid #2f5f8f;
+    border-radius: 12px;
+  }
+  .pad:active { background: rgba(90,170,230,0.55); }
+  #kick {
+    -webkit-user-select: none; user-select: none;
+    touch-action: none; pointer-events: auto;
+    width: 104px; height: 104px; border-radius: 50%;
+    font: bold 20px "Courier New", monospace;
+    color: #06121f; background: #8fd2ff;
+    border: 3px solid #eaf6ff;
+  }
+  #kick:active { background: #ffe27a; }
+
+  /* short windows: shrink the controls and drop the keyboard hint */
+  @media (max-height: 620px) {
+    #help { display: none; }
+    .pad { width: 46px; height: 46px; font-size: 19px; border-radius: 9px; }
+    #kick { width: 76px; height: 76px; font-size: 15px; }
+    body.touch #touch, #touch { padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="900" height="600"></canvas>
+  <div id="help">
+    <b>&larr; &rarr;</b> turn &nbsp;·&nbsp; <b>&uarr;</b> run &nbsp;·&nbsp; <b>SPACE / Z</b> shoot &nbsp;·&nbsp; <b>P</b> pause &nbsp;·&nbsp; <b>R</b> restart
+  </div>
+</div>
+<div id="touch">
+  <div id="steer">
+    <div class="pad" id="pad-left">&#8634;</div>
+    <div class="pad" id="pad-thrust">&uarr;</div>
+    <div class="pad" id="pad-right">&#8635;</div>
+  </div>
+  <button id="kick">SHOOT</button>
+</div>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// Playfield size follows the device: fills a phone screen, capped on desktop.
+let W = 900, H = 600;
+function fitCanvas() {
+  // measure the real controls/help so the pitch never sits under them
+  const tEl = document.getElementById('touch');
+  const hEl = document.getElementById('help');
+  const ctrlH = tEl ? tEl.offsetHeight : 0;
+  const helpH = (hEl && getComputedStyle(hEl).display !== 'none') ? hEl.offsetHeight : 0;
+  const wrapEl = document.getElementById('wrap');
+  if (wrapEl) wrapEl.style.paddingBottom = (ctrlH + 6) + 'px';
+  const reserved = ctrlH + helpH + 26;
+  const availW = Math.min(window.innerWidth - 12, 1000);
+  const availH = Math.min(window.innerHeight - reserved, 760);
+  W = Math.max(240, Math.floor(availW));
+  H = Math.max(170, Math.floor(availH));
+  K = Math.max(0.55, Math.min(1, Math.min(W, H) / 560));
+  SIZES = { 3: 40 * K, 2: 25 * K, 1: 15 * K };
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  canvas.width = Math.floor(W * dpr);
+  canvas.height = Math.floor(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);     // draw in CSS pixels
+}
+addEventListener('resize', fitCanvas);
+addEventListener('orientationchange', () => setTimeout(fitCanvas, 150));
+
+const WAVES_TO_WIN = 3;      // clear three waves and Argentina take the tie
+// Everything scales with the playfield so a phone plays like a desktop, just smaller
+let K = 1;
+let SIZES = { 3: 40, 2: 25, 1: 15 };     // radius per Spain player tier
+
+const keys = {};
+addEventListener('keydown', e => {
+  if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key)) e.preventDefault();
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === ' ' || e.key === 'z' || e.key === 'Z') fireQueued = true;
+  if (e.key === 'r' || e.key === 'R') resetGame();
+  if (e.key === 'p' || e.key === 'P') {
+    if (state === 'play') state = 'pause'; else if (state === 'pause') state = 'play';
+  }
+});
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+// ---- touch controls ----
+if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) {
+  document.body.classList.add('touch');
+}
+function bindHold(id, key) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const on = e => {
+    e.preventDefault();
+    if (key === ' ' && (state === 'over' || state === 'win')) { resetGame(); return; }
+    keys[key] = true;
+    // give a short tap an immediate effect rather than waiting on the next frame
+    if (key === ' ') fireQueued = true;
+    if (state === 'play' && messi && messi.down === 0) {
+      if (key === 'arrowleft')  messi.ang -= 0.09;
+      if (key === 'arrowright') messi.ang += 0.09;
+      if (key === 'arrowup') {
+        messi.vx += Math.cos(messi.ang) * 0.5 * K;
+        messi.vy += Math.sin(messi.ang) * 0.5 * K;
+      }
+    }
+  };
+  const off = e => { e.preventDefault(); keys[key] = false; };
+  el.addEventListener('touchstart', on, { passive: false });
+  el.addEventListener('touchend', off, { passive: false });
+  el.addEventListener('touchcancel', off, { passive: false });
+  el.addEventListener('mousedown', on);
+  el.addEventListener('mouseup', off);
+  el.addEventListener('mouseleave', off);
+}
+bindHold('pad-left', 'arrowleft');
+bindHold('pad-right', 'arrowright');
+bindHold('pad-thrust', 'arrowup');
+bindHold('kick', ' ');
+canvas.addEventListener('touchstart', e => {
+  if (state === 'over' || state === 'win') { e.preventDefault(); resetGame(); }
+}, { passive: false });
+
+let state, messi, balls, spain, bits, score, lives, wave, shootCd, msg, msgT;
+// a quick tap/click must still register, even if it ends before the next frame
+let fireQueued = false;
+
+function resetGame() {
+  state = 'play';
+  score = 0;
+  lives = 3;
+  wave = 1;
+  shootCd = 0;
+  msg = 'WAVE 1'; msgT = 90;
+  balls = [];
+  spain = [];
+  bits = [];
+  messi = { x: W/2, y: H/2, vx: 0, vy: 0, ang: -Math.PI/2, inv: 190, down: 0 };
+  spawnWave();
+}
+
+function spawnWave() {
+  // Spain start out wide, never right on top of Messi
+  const count = 3 + wave;
+  for (let i = 0; i < count; i++) {
+    let x, y;
+    do {
+      x = Math.random() * W;
+      y = Math.random() * H;
+    } while (Math.hypot(x - W/2, y - H/2) < Math.min(180, Math.min(W, H) * 0.3));
+    spain.push(makeSpaniard(x, y, 3));
+  }
+}
+
+function makeSpaniard(x, y, size) {
+  const sp = (0.5 + Math.random() * 0.7) * (1 + (3 - size) * 0.35) * (1 + wave * 0.07) * K;
+  const dir = Math.random() * Math.PI * 2;
+  return {
+    x, y, size,
+    vx: Math.cos(dir) * sp,
+    vy: Math.sin(dir) * sp,
+    ang: Math.random() * Math.PI * 2,
+    spin: (Math.random() - 0.5) * 0.03
+  };
+}
+
+// ---- helpers ----
+function wrapD(a, b, size) {           // shortest signed distance a -> b on a wrapped axis
+  let d = b - a;
+  if (d > size / 2) d -= size;
+  if (d < -size / 2) d += size;
+  return d;
+}
+function mod(n, m) { return ((n % m) + m) % m; }
+
+function burst(x, y, col, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, sp = Math.random() * 3.5 + 0.6;
+    bits.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 28 + Math.random() * 22, col });
+  }
+}
+
+// ---- update ----
+// don't put Messi back on until the middle of the pitch is actually safe
+function centreClear() {
+  const safe = Math.min(W, H) * 0.22;
+  for (const s of spain) {
+    if (Math.hypot(wrapD(W/2, s.x, W), wrapD(H/2, s.y, H)) < SIZES[s.size] + safe) return false;
+  }
+  return true;
+}
+
+function update() {
+  if (state !== 'play') return;
+
+  if (messi.down > 0) {
+    // Messi is down: hold him off until the centre clears, then bring him back on
+    messi.down--;
+    if (messi.down === 0) {
+      if (!centreClear()) {
+        messi.down = 10;                 // still crowded — wait a bit longer
+      } else {
+        messi.x = W/2; messi.y = H/2;
+        messi.vx = messi.vy = 0;
+        messi.ang = -Math.PI/2;
+        messi.inv = 150;
+      }
+    }
+  } else {
+
+  // Messi: turn, run, drift
+  if (keys['arrowleft'])  messi.ang -= 0.062;
+  if (keys['arrowright']) messi.ang += 0.062;
+  if (keys['arrowup']) {
+    messi.vx += Math.cos(messi.ang) * 0.14 * K;
+    messi.vy += Math.sin(messi.ang) * 0.14 * K;
+    burst(messi.x - Math.cos(messi.ang) * 14 * K, messi.y - Math.sin(messi.ang) * 14 * K, '#ffd27a', 1);
+  }
+  messi.vx *= 0.991; messi.vy *= 0.991;
+  const sp = Math.hypot(messi.vx, messi.vy), MAX = 6.2 * K;
+  if (sp > MAX) { messi.vx = messi.vx / sp * MAX; messi.vy = messi.vy / sp * MAX; }
+  messi.x = mod(messi.x + messi.vx, W);
+  messi.y = mod(messi.y + messi.vy, H);
+  if (messi.inv > 0) messi.inv--;
+
+  // shooting
+  if (shootCd > 0) shootCd--;
+  if ((keys[' '] || keys['z'] || fireQueued) && shootCd === 0) {
+    balls.push({
+      x: messi.x + Math.cos(messi.ang) * 18 * K,
+      y: messi.y + Math.sin(messi.ang) * 18 * K,
+      vx: Math.cos(messi.ang) * 8.4 * K + messi.vx * 0.5,
+      vy: Math.sin(messi.ang) * 8.4 * K + messi.vy * 0.5,
+      life: 62
+    });
+    shootCd = 11;
+    fireQueued = false;
+  }
+
+  }  // end of "Messi is on the pitch"
+
+  for (const b of balls) {
+    b.x = mod(b.x + b.vx, W);
+    b.y = mod(b.y + b.vy, H);
+    b.life--;
+  }
+
+  for (const s of spain) {
+    s.x = mod(s.x + s.vx, W);
+    s.y = mod(s.y + s.vy, H);
+    s.ang += s.spin;
+  }
+
+  // balls vs Spain — a hit splits them into two smaller players
+  const born = [];
+  for (const b of balls) {
+    if (b.life <= 0) continue;
+    for (const s of spain) {
+      if (s.dead) continue;
+      const d = Math.hypot(wrapD(b.x, s.x, W), wrapD(b.y, s.y, H));
+      if (d < SIZES[s.size]) {
+        b.life = 0;
+        s.dead = true;
+        score += s.size === 3 ? 20 : s.size === 2 ? 50 : 100;
+        burst(s.x, s.y, '#ff5a5a', 18);
+        if (s.size > 1) {
+          born.push(makeSpaniard(s.x, s.y, s.size - 1));
+          born.push(makeSpaniard(s.x, s.y, s.size - 1));
+        }
+        break;
+      }
+    }
+  }
+  spain = spain.filter(s => !s.dead).concat(born);
+
+  // Spain vs Messi
+  if (messi.inv <= 0 && messi.down === 0) {
+    for (const s of spain) {
+      const d = Math.hypot(wrapD(messi.x, s.x, W), wrapD(messi.y, s.y, H));
+      if (d < SIZES[s.size] + 11 * K) { loseLife(); break; }
+    }
+  }
+
+  for (const p of bits) { p.x += p.vx; p.y += p.vy; p.life--; }
+
+  balls = balls.filter(b => b.life > 0);
+  bits = bits.filter(p => p.life > 0);
+  if (msgT > 0) msgT--;
+
+  // wave cleared?
+  if (spain.length === 0) {
+    if (wave >= WAVES_TO_WIN) {
+      state = 'win';
+    } else {
+      wave++;
+      score += 200;
+      msg = 'WAVE ' + wave; msgT = 90;
+      messi.inv = 80;
+      spawnWave();
+    }
+  }
+}
+
+function loseLife() {
+  burst(messi.x, messi.y, '#8fd2ff', 34);
+  lives--;
+  if (lives <= 0) {
+    state = 'over';
+  } else {
+    messi.down = 55;          // brief pause, then respawn once the centre is clear
+    messi.vx = messi.vy = 0;
+    messi.inv = 0;
+  }
+}
+
+// ---- drawing ----
+// draw fn at every wrapped copy so nothing pops at the edges
+function wrapDraw(x, y, r, fn) {
+  for (let ox = -1; ox <= 1; ox++) {
+    for (let oy = -1; oy <= 1; oy++) {
+      const dx = x + ox * W, dy = y + oy * H;
+      if (dx < -r || dx > W + r || dy < -r || dy > H + r) continue;
+      ctx.save(); ctx.translate(dx, dy); fn(); ctx.restore();
+    }
+  }
+}
+
+// a footballer figure centred at the origin
+function footballer(kit, s) {
+  ctx.save();
+  ctx.scale(s, s);
+  const skin = '#e8b892';
+  ctx.lineCap = 'round';
+  // legs
+  ctx.strokeStyle = kit.socks; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(-4, 6); ctx.lineTo(-6, 17); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(4, 6);  ctx.lineTo(6, 17);  ctx.stroke();
+  // shorts
+  ctx.fillStyle = kit.shorts; ctx.fillRect(-6, 2, 12, 7);
+  // shirt
+  if (kit.stripes) {
+    const cols = ['#ffffff', '#75aadb'];
+    for (let i = 0; i < 5; i++) {
+      ctx.fillStyle = cols[i % 2];
+      ctx.fillRect(-7 + i * 2.8, -9, 2.8, 12);
+    }
+  } else {
+    ctx.fillStyle = kit.shirt; ctx.fillRect(-7, -9, 14, 12);
+  }
+  ctx.strokeStyle = kit.outline; ctx.lineWidth = 1.2;
+  ctx.strokeRect(-7, -9, 14, 12);
+  // arms
+  ctx.strokeStyle = skin; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(-7, -6); ctx.lineTo(-12, -1); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(7, -6);  ctx.lineTo(12, -1);  ctx.stroke();
+  // head
+  ctx.fillStyle = skin;
+  ctx.beginPath(); ctx.arc(0, -15, 5, 0, 7); ctx.fill();
+  ctx.strokeStyle = kit.outline; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(0, -15, 5, 0, 7); ctx.stroke();
+  ctx.restore();
+}
+
+const SPAIN_KIT = { stripes: false, shirt: '#c60b1e', shorts: '#12224a', socks: '#12224a', outline: '#5c0510' };
+const ARG_KIT   = { stripes: true,  shorts: '#12224a', socks: '#ffffff', outline: '#0b1a3a' };
+
+function draw() {
+  ctx.fillStyle = '#060a12';
+  ctx.fillRect(0, 0, W, H);
+
+  // bits
+  for (const p of bits) {
+    ctx.globalAlpha = Math.max(0, p.life / 45);
+    ctx.fillStyle = p.col;
+    ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+
+  // Spain — tumbling red shirts
+  for (const s of spain) {
+    const r = SIZES[s.size];
+    wrapDraw(s.x, s.y, r + 30, () => {
+      ctx.rotate(s.ang);
+      footballer(SPAIN_KIT, r / 19);
+    });
+  }
+
+  // footballs
+  for (const b of balls) {
+    wrapDraw(b.x, b.y, 8, () => {
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath(); ctx.arc(0, 0, 4.5, 0, 7); ctx.fill();
+      ctx.strokeStyle = '#2a2a2a'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(0, 0, 4.5, 0, 7); ctx.stroke();
+      ctx.fillStyle = '#222';
+      ctx.beginPath(); ctx.arc(0, 0, 1.7, 0, 7); ctx.fill();
+    });
+  }
+
+  // Messi — upright, with a boot arrow showing where he'll shoot
+  const blink = messi.inv > 0 && Math.floor(messi.inv / 5) % 2 === 0;
+  if (!blink && messi.down === 0) {
+    wrapDraw(messi.x, messi.y, 60 * K, () => {
+      // Messi spins to face wherever he's about to shoot
+      ctx.rotate(messi.ang + Math.PI / 2);
+      ctx.scale(K, K);
+      // aim arrow, pointing the way he's facing
+      ctx.strokeStyle = '#ffe27a'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(0, -30); ctx.lineTo(0, -40); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, -46); ctx.lineTo(-5, -39); ctx.lineTo(5, -39);
+      ctx.closePath(); ctx.fillStyle = '#ffe27a'; ctx.fill();
+      footballer(ARG_KIT, 1.35);
+      // the No. 10
+      ctx.fillStyle = '#0b1a3a';
+      ctx.font = 'bold 9px Courier New';
+      ctx.textAlign = 'center';
+      ctx.fillText('10', 0, 2);
+    });
+  }
+
+  // HUD
+  const hf = Math.max(11, Math.min(16, W / 26));
+  ctx.fillStyle = '#8fd2ff';
+  ctx.font = hf + 'px Courier New';
+  ctx.textAlign = 'left';
+  ctx.fillText(String(score).padStart(6, '0'), 10, hf + 8);
+  ctx.textAlign = 'center';
+  ctx.fillText('WAVE ' + wave + '/' + WAVES_TO_WIN, W/2, hf + 8);
+  ctx.textAlign = 'right';
+  ctx.fillText('❤'.repeat(Math.max(0, lives)), W - 10, hf + 8);
+
+  // wave call-out
+  if (msgT > 0 && state === 'play') {
+    ctx.textAlign = 'center';
+    ctx.globalAlpha = Math.min(1, msgT / 40);
+    ctx.fillStyle = '#8fd2ff';
+    ctx.font = 'bold ' + fitFont(msg, 30) + 'px Courier New';
+    ctx.fillText(msg, W/2, H/2 - H * 0.18);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.textAlign = 'center';
+  if (state === 'pause') banner('PAUSED', 'press P to resume', '#8fd2ff');
+  if (state === 'win')  banner('ARGENTINA WIN THE FINAL!', 'Messi clears the lot — score ' + score, '#75aadb');
+  if (state === 'over') banner('SPAIN WIN THE FINAL!', 'Messi is out of legs — score ' + score, '#ff6a6a');
+}
+
+// Courier is ~0.6em wide per character, so size the text to actually fit the screen
+function fitFont(text, max) {
+  return Math.max(10, Math.min(max, (W - 28) / (text.length * 0.62)));
+}
+
+function banner(a, b, col) {
+  const touch = document.body.classList.contains('touch');
+  const hint = touch ? 'tap the pitch to play again' : 'press R to play again';
+  const fa = fitFont(a, 32), fb = fitFont(b, 16), fh = fitFont(hint, 14);
+  const half = fa * 0.9 + 46;
+  ctx.fillStyle = 'rgba(6,10,18,0.85)';
+  ctx.fillRect(0, H/2 - half, W, half * 2);
+  ctx.fillStyle = col;
+  ctx.font = 'bold ' + fa + 'px Courier New';
+  ctx.fillText(a, W/2, H/2);
+  ctx.fillStyle = '#a9c4dd';
+  ctx.font = fb + 'px Courier New';
+  ctx.fillText(b, W/2, H/2 + fa * 0.95);
+  ctx.fillStyle = '#7f9bb8';
+  ctx.font = fh + 'px Courier New';
+  ctx.fillText(hint, W/2, H/2 + fa * 0.95 + fb * 1.5);
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+fitCanvas();
+resetGame();
+loop();
+</script>
+</body>
+</html>
